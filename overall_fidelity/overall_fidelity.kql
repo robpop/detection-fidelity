@@ -1,0 +1,19 @@
+// this provides an idea of total effectiveness of all enabled detections
+// does not break down by alert
+SecurityIncident
+| summarize arg_max(TimeGenerated, *) by TenantId, IncidentName
+| where CreatedTime >= ago(90d)                                                     // from 90 days ago
+| where Status == "Closed"
+| where Classification in ("TruePositive", "FalsePositive", "BenignPositive")       // get metrics for the three classifications defined
+| summarize
+    TruePositives = countif(Classification == "TruePositive"),
+    FalsePositives = countif(Classification == "FalsePositive"),
+    BenignPositives = countif(Classification == "BenignPositive")
+| extend Total = TruePositives + FalsePositives + BenignPositives
+| extend
+    TruePositivePct = round(100.0 * TruePositives / Total, 2),
+    FalsePositivePct = round(100.0 * FalsePositives / Total, 2),
+    BenignPositivePct = round(100.0 * BenignPositives / Total, 2)
+| project Total, TruePositives, TruePositivePct,
+          FalsePositives, FalsePositivePct,
+          BenignPositives, BenignPositivePct
