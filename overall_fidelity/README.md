@@ -16,7 +16,6 @@ Use it to track how much of your SOC's triage effort goes to real threats versus
 - [Interpreting the Results](#interpreting-the-results)
 - [Customization](#customization)
 - [Limitations](#limitations)
-- [License](#license)
 
 ---
 
