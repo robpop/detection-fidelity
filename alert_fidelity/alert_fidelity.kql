@@ -1,0 +1,67 @@
+// Measures the effectiveness of custom detection rules in Microsoft Defender XDR over the last 30 days, 
+// using analyst incident classifications to identify which rules are generating true positives, false positives, or benign positives
+// Important: The classification percentages are calculated only from alerts associated with classified incidents, not from every alert generated
+// For example, if a rule generates 100 alerts but only 20 are associated with classified incidents, its true-positive percentage is calculated from those 20 alerts
+// Also, because classifications belong to incidents rather than individual alerts, a true-positive incident can cause multiple associated alerts to be counted as true positives
+// Therefore, the TotalAlerts column is a useful metric for identifying potentially noisy custom detection rules, while the other columns can identify whether those detection rules are low-fidelity
+// -------------
+// AlertInfo and SecurityIncident are both needed because Microsoft keeps the data we need separated
+// AlertInfo provides us with the custom detections from DetectionSource,
+// SecurityIncident is where the classification information for that incident is, so the two tables need to be joined
+// SecurityAlert connects the two by providing both the SystemAlertId (SecurityIncident.AlertIds) and VendorOriginalId (AlertInfo.AlertId)
+let lookbackPeriod = 30d;
+// find every alert raised by a custom detection rule.
+let CustomDetectionAlerts = AlertInfo
+    | where Timestamp > ago(lookbackPeriod)
+    // the DetectionSource for Defender XDR custom detection rules is "Custom detection"
+    | where DetectionSource == "Custom detection"
+    | project AlertId, RuleName = Title
+    | distinct AlertId, RuleName;
+// map Defender alert IDs to the IDs referenced by Sentinel incidents
+// verify that VendorOriginalId matches AlertInfo.AlertId in your environment
+let AlertIdLookup = SecurityAlert
+    | where TimeGenerated > ago(lookbackPeriod)
+    | project DefenderAlertId = VendorOriginalId, SentinelAlertId = SystemAlertId
+    | distinct DefenderAlertId, SentinelAlertId;
+// get closed incidents that have a verdict.
+// each incident is logged many times as it changes, so keep only its latest version,
+// then split it into one row per alert it contains
+let ClassifiedIncidents = SecurityIncident
+    | where TimeGenerated > ago(lookbackPeriod)
+    | summarize arg_max(TimeGenerated, *) by IncidentNumber
+    | where Status == "Closed"
+    | where Classification in ("TruePositive", "FalsePositive", "BenignPositive")
+    | mv-expand SentinelAlertId = AlertIds to typeof(string)
+    | project SentinelAlertId, Classification, ClassificationReason;
+// attach each incident's verdict to the custom detection alerts
+// alerts with no verdict yet keep an empty Classification
+let AlertsWithVerdicts = CustomDetectionAlerts
+    | join kind=leftouter AlertIdLookup on $left.AlertId == $right.DefenderAlertId
+    | join kind=leftouter ClassifiedIncidents on SentinelAlertId
+    | project AlertId, RuleName, Classification, ClassificationReason;
+// count the reasons analysts gave for each verdict, per rule
+// example output -> {"FalsePositive: IncorrectAlertLogic": 4, "TruePositive: SuspiciousActivity": 2}
+let ReasonBreakdownByRule = AlertsWithVerdicts
+    | where isnotempty(Classification)
+    | extend Reason = iff(isempty(ClassificationReason), "NoReasonGiven", ClassificationReason)
+    | summarize AlertCount = dcount(AlertId) by RuleName, Verdict = strcat(Classification, ": ", Reason)
+    | summarize ReasonBreakdown = make_bag(bag_pack(Verdict, AlertCount)) by RuleName;
+// count verdicts per rule and turn them into percentages.
+AlertsWithVerdicts
+| summarize
+    TotalAlerts    = dcount(AlertId),
+    TruePositive   = dcountif(AlertId, Classification == "TruePositive"),
+    FalsePositive  = dcountif(AlertId, Classification == "FalsePositive"),
+    BenignPositive = dcountif(AlertId, Classification == "BenignPositive")
+    by RuleName
+| extend AlertsWithVerdict = TruePositive + FalsePositive + BenignPositive
+| extend
+    TruePositivePercent   = round(100.0 * TruePositive   / AlertsWithVerdict, 1),
+    FalsePositivePercent  = round(100.0 * FalsePositive  / AlertsWithVerdict, 1),
+    BenignPositivePercent = round(100.0 * BenignPositive / AlertsWithVerdict, 1)
+| join kind=leftouter ReasonBreakdownByRule on RuleName
+| project RuleName, TotalAlerts,
+          TruePositive, FalsePositive, BenignPositive,
+          TruePositivePercent, FalsePositivePercent, BenignPositivePercent,
+          ReasonBreakdown
+| order by TotalAlerts desc
