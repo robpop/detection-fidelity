@@ -1,0 +1,5 @@
+// Return Sentinel Analytics Rules that have failed
+// Intentionally boilerplate so that you can tailor with more granularity for your environment 
+SentinelHealth
+| where Status !~ "Success"
+| where SentinelResourceType =~ "Analytics Rule"
